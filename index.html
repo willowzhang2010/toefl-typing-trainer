@@ -617,106 +617,10 @@ function hashPwd(pwd){
   return 'h'+(h>>>0).toString(36)+pwd.length;
 }
 
-// ==================== LZ-STRING COMPRESSION ====================
-// Lightweight LZ-based compression for shortening share codes
-function lzCompress(input){
-  if(input==null) return '';
-  let i, j, res = [], dictionary = {}, c, wc, w = '', enlargeIn = 2, dictSize = 256, numBits = 8;
-  const data = [];
-  let data_val = 0, data_position = 0;
-  const String = {fromCharCode: String.fromCharCode};
-  for(i=0;i<input.length;i++){
-    c = input.charCodeAt(i);
-    if(dictionary[c]===undefined){ dictionary[c] = dictSize++; }
-    wc = w+String.fromCharCode(c);
-    if(dictionary[wc]!==undefined){ w = wc; }
-    else {
-      // output w code
-      const w_code = dictionary[w];
-      for(j=0;j<numBits;j++){
-        data_val = (data_val<<1) | ((w_code>>>(numBits-1-j))&1);
-        data_position++;
-        if(data_position===16){ data_position=0; data.push(data_val); data_val=0; }
-      }
-      enlargeIn--;
-      if(enlargeIn===0){ enlargeIn = Math.pow(2,numBits); numBits++; }
-      dictionary[wc] = dictSize++;
-      w = String.fromCharCode(c);
-    }
-  }
-  if(w!==''){
-    const w_code = dictionary[w];
-    for(j=0;j<numBits;j++){
-      data_val = (data_val<<1) | ((w_code>>>(numBits-1-j))&1);
-      data_position++;
-      if(data_position===16){ data_position=0; data.push(data_val); data_val=0; }
-    }
-    enlargeIn--;
-    if(enlargeIn===0){ enlargeIn = Math.pow(2,numBits); numBits++; }
-  }
-  // flush
-  if(data_position>0){
-    while(data_position<16){ data_val = (data_val<<1); data_position++; }
-    data.push(data_val);
-  }
-  // Convert to base64-like string using custom alphabet
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
-  let result = '';
-  for(i=0;i<data.length;i++){
-    const code = data[i];
-    result += chars[(code>>10)&63] + chars[(code>>4)&63] + chars[code&15];
-  }
-  return result;
-}
-function lzDecompress(compressed){
-  if(!compressed || compressed.length===0) return '';
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
-  const charMap = {};
-  for(let i=0;i<chars.length;i++) charMap[chars[i]] = i;
-  // Decode from base64-like string to 16-bit data array
-  const data = [];
-  for(let i=0;i<compressed.length;i+=3){
-    const c1 = charMap[compressed[i]]||0;
-    const c2 = charMap[compressed[i+1]]||0;
-    const c3 = charMap[compressed[i+2]]||0;
-    data.push((c1<<10)|(c2<<4)|c3);
-  }
-  // Decompress
-  const dictionary = [];
-  let enlargeIn = 2, dictSize = 256, numBits = 8;
-  let data_idx = 0, data_bit = 0;
-  function readBits(count){
-    let result = 0;
-    for(let i=0;i<count;i++){
-      result = (result<<1) | ((data[data_idx]>>>(15-data_bit))&1);
-      data_bit++;
-      if(data_bit===16){ data_bit=0; data_idx++; }
-    }
-    return result;
-  }
-  let w = String.fromCharCode(readBits(8));
-  let result = w;
-  let c, entry;
-  dictionary[256] = 0; // placeholder
-  while(true){
-    if(data_idx >= data.length) break;
-    const code = readBits(numBits);
-    if(code===dictSize){ dictionary[dictSize++] = w+w[0]; }
-    if(code < dictSize){
-      entry = code < 256 ? String.fromCharCode(code) : (dictionary[code]||'');
-    } else {
-      entry = w+w[0];
-    }
-    if(!entry) break;
-    result += entry;
-    dictionary[dictSize++] = w + entry[0];
-    w = entry;
-    enlargeIn--;
-    if(enlargeIn===0){ enlargeIn = Math.pow(2,numBits); numBits++; }
-    if(data_idx >= data.length) break;
-  }
-  return result;
-}
+// ==================== LZ-STRING COMPRESSION (official lz-string@1.5.0) ====================
+var LZString=function(){var r=String.fromCharCode,o="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=",n="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-$",e={};function t(r,o){if(!e[r]){e[r]={};for(var n=0;n<r.length;n++)e[r][r.charAt(n)]=n}return e[r][o]}var i={compressToBase64:function(r){if(null==r)return"";var n=i._compress(r,6,function(r){return o.charAt(r)});switch(n.length%4){default:case 0:return n;case 1:return n+"===";case 2:return n+"==";case 3:return n+"="}},decompressFromBase64:function(r){return null==r?"":""==r?null:i._decompress(r.length,32,function(n){return t(o,r.charAt(n))})},compressToUTF16:function(o){return null==o?"":i._compress(o,15,function(o){return r(o+32)})+" "},decompressFromUTF16:function(r){return null==r?"":""==r?null:i._decompress(r.length,16384,function(o){return r.charCodeAt(o)-32})},compressToUint8Array:function(r){for(var o=i.compress(r),n=new Uint8Array(2*o.length),e=0,t=o.length;e<t;e++){var s=o.charCodeAt(e);n[2*e]=s>>>8,n[2*e+1]=s%256}return n},decompressFromUint8Array:function(o){if(null==o)return i.decompress(o);for(var n=new Array(o.length/2),e=0,t=n.length;e<t;e++)n[e]=256*o[2*e]+o[2*e+1];var s=[];return n.forEach(function(o){s.push(r(o))}),i.decompress(s.join(""))},compressToEncodedURIComponent:function(r){return null==r?"":i._compress(r,6,function(r){return n.charAt(r)})},decompressFromEncodedURIComponent:function(r){return null==r?"":""==r?null:(r=r.replace(/ /g,"+"),i._decompress(r.length,32,function(o){return t(n,r.charAt(o))}))},compress:function(o){return i._compress(o,16,function(o){return r(o)})},_compress:function(r,o,n){if(null==r)return"";var e,t,i,s={},u={},a="",p="",c="",l=2,f=3,h=2,d=[],m=0,v=0;for(i=0;i<r.length;i+=1)if(a=r.charAt(i),Object.prototype.hasOwnProperty.call(s,a)||(s[a]=f++,u[a]=!0),p=c+a,Object.prototype.hasOwnProperty.call(s,p))c=p;else{if(Object.prototype.hasOwnProperty.call(u,c)){if(c.charCodeAt(0)<256){for(e=0;e<h;e++)m<<=1,v==o-1?(v=0,d.push(n(m)),m=0):v++;for(t=c.charCodeAt(0),e=0;e<8;e++)m=m<<1|1&t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t>>=1}else{for(t=1,e=0;e<h;e++)m=m<<1|t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t=0;for(t=c.charCodeAt(0),e=0;e<16;e++)m=m<<1|1&t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t>>=1}0==--l&&(l=Math.pow(2,h),h++),delete u[c]}else for(t=s[c],e=0;e<h;e++)m=m<<1|1&t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t>>=1;0==--l&&(l=Math.pow(2,h),h++),s[p]=f++,c=String(a)}if(""!==c){if(Object.prototype.hasOwnProperty.call(u,c)){if(c.charCodeAt(0)<256){for(e=0;e<h;e++)m<<=1,v==o-1?(v=0,d.push(n(m)),m=0):v++;for(t=c.charCodeAt(0),e=0;e<8;e++)m=m<<1|1&t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t>>=1}else{for(t=1,e=0;e<h;e++)m=m<<1|t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t=0;for(t=c.charCodeAt(0),e=0;e<16;e++)m=m<<1|1&t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t>>=1}0==--l&&(l=Math.pow(2,h),h++),delete u[c]}else for(t=s[c],e=0;e<h;e++)m=m<<1|1&t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t>>=1;0==--l&&(l=Math.pow(2,h),h++)}for(t=2,e=0;e<h;e++)m=m<<1|1&t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t>>=1;for(;;){if(m<<=1,v==o-1){d.push(n(m));break}v++}return d.join("")},decompress:function(r){return null==r?"":""==r?null:i._decompress(r.length,32768,function(o){return r.charCodeAt(o)})},_decompress:function(o,n,e){var t,i,s,u,a,p,c,l=[],f=4,h=4,d=3,m="",v=[],g={val:e(0),position:n,index:1};for(t=0;t<3;t+=1)l[t]=t;for(s=0,a=Math.pow(2,2),p=1;p!=a;)u=g.val&g.position,g.position>>=1,0==g.position&&(g.position=n,g.val=e(g.index++)),s|=(u>0?1:0)*p,p<<=1;switch(s){case 0:for(s=0,a=Math.pow(2,8),p=1;p!=a;)u=g.val&g.position,g.position>>=1,0==g.position&&(g.position=n,g.val=e(g.index++)),s|=(u>0?1:0)*p,p<<=1;c=r(s);break;case 1:for(s=0,a=Math.pow(2,16),p=1;p!=a;)u=g.val&g.position,g.position>>=1,0==g.position&&(g.position=n,g.val=e(g.index++)),s|=(u>0?1:0)*p,p<<=1;c=r(s);break;case 2:return""}for(l[3]=c,i=c,v.push(c);;){if(g.index>o)return"";for(s=0,a=Math.pow(2,d),p=1;p!=a;)u=g.val&g.position,g.position>>=1,0==g.position&&(g.position=n,g.val=e(g.index++)),s|=(u>0?1:0)*p,p<<=1;switch(c=s){case 0:for(s=0,a=Math.pow(2,8),p=1;p!=a;)u=g.val&g.position,g.position>>=1,0==g.position&&(g.position=n,g.val=e(g.index++)),s|=(u>0?1:0)*p,p<<=1;l[h++]=r(s),c=h-1,f--;break;case 1:for(s=0,a=Math.pow(2,16),p=1;p!=a;)u=g.val&g.position,g.position>>=1,0==g.position&&(g.position=n,g.val=e(g.index++)),s|=(u>0?1:0)*p,p<<=1;l[h++]=r(s),c=h-1,f--;break;case 2:return v.join("")}if(0==f&&(f=Math.pow(2,d),d++),l[c])m=l[c];else{if(c!==h)return null;m=i+i.charAt(0)}v.push(m),l[h++]=i+m.charAt(0),i=m,0==--f&&(f=Math.pow(2,d),d++)}}};return i}();
+function lzCompress(input){ return LZString.compressToEncodedURIComponent(input); }
+function lzDecompress(compressed){ return LZString.decompressFromEncodedURIComponent(compressed); }
 
 function defaultUserObj(username,role,expireAt){
   return {
@@ -3295,24 +3199,20 @@ function generateShareCode(){
 }
 function parseShareCode(code){
   try{
-    if(!code) return null;
-    // v3+: LZ compressed (TY + compressed string)
-    if(code.startsWith('TY') && !code.startsWith('TYe') && code.length < 200){
-      const compressed = code.substring(2);
-      const json = lzDecompress(compressed);
-      if(json){
-        const data = JSON.parse(json);
-        if(data.essays && data.vocab) return data;
-      }
-    }
-    // v1/v2: Base64 (legacy, fallback)
-    if(code.startsWith('TY')){
-      const b64 = code.substring(2);
-      const json = decodeURIComponent(escape(atob(b64)));
+    if(!code || !code.startsWith('TY')) return null;
+    const payload = code.substring(2);
+    // Try LZ compressed first
+    const json = lzDecompress(payload);
+    if(json){
       const data = JSON.parse(json);
-      if(!data.essays || !data.vocab || !data.sentences) return null;
-      return data;
+      if(data.essays && data.vocab) return data;
     }
+    // Fallback: Base64 (legacy v1/v2)
+    try{
+      const b64json = decodeURIComponent(escape(atob(payload)));
+      const data = JSON.parse(b64json);
+      if(data.essays && data.vocab && data.sentences) return data;
+    }catch(e2){}
     return null;
   }catch(e){
     return null;
@@ -3346,6 +3246,7 @@ function showShareCodeModal(){
         <strong>包含内容：</strong>${count}
       </p>
       <textarea id="shareCodeText" readonly rows="6" style="width:100%;padding:10px;border:1px solid var(--rule);border-radius:6px;font-size:.78rem;word-break:break-all;background:var(--bg);color:var(--ink);font-family:monospace">${code}</textarea>
+      <p style="font-size:.75rem;color:var(--muted);margin-top:6px;text-align:right">长度：${code.length} 字符</p>
       <div style="display:flex;gap:10px;margin-top:14px;justify-content:flex-end">
         <button onclick="copyShareCode()" class="btn-primary" style="padding:8px 18px;border-radius:8px">复制更新码</button>
         <button onclick="closeShareCodeModal()" style="padding:8px 18px;border-radius:8px;border:1px solid var(--rule);background:var(--card);color:var(--ink)">关闭</button>
@@ -3354,12 +3255,19 @@ function showShareCodeModal(){
   `;
   document.body.appendChild(modal);
 }
+function fallbackCopy(ta){
+  ta.select();
+  try{ document.execCommand('copy'); toast('已复制到剪贴板'); }
+  catch(e){ toast('请手动选中复制'); }
+}
 function copyShareCode(){
   const ta = document.getElementById('shareCodeText');
-  if(ta){
-    ta.select();
-    document.execCommand('copy');
-    toast('已复制到剪贴板');
+  if(!ta) return;
+  const text = ta.value;
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).then(()=>toast('已复制到剪贴板')).catch(()=>fallbackCopy(ta));
+  } else {
+    fallbackCopy(ta);
   }
 }
 function closeShareCodeModal(){
@@ -3431,10 +3339,10 @@ function generateReportCode(){
   // Show modal
   const overlay = document.createElement('div');
   overlay.id = 'reportCodeModal';
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px';
+  overlay.className = 'modal-overlay';
   overlay.innerHTML = `
-    <div style="background:var(--card);border-radius:12px;padding:24px;max-width:500px;width:100%;box-shadow:0 8px 32px rgba(0,0,0,.2)">
-      <h3 style="margin:0 0 12px">📋 练习数据上报码</h3>
+    <div class="modal-card">
+      <div class="modal-title">📋 练习数据上报码</div>
       <p style="font-size:.85rem;color:var(--muted);margin:0 0 12px">将此码发给管理员，管理员导入后可汇总到项目数据看板。</p>
       <div style="background:var(--bg);border:1px solid var(--rule);border-radius:8px;padding:12px;margin-bottom:12px;font-size:.82rem">
         <div style="display:flex;justify-content:space-between;margin-bottom:6px">
@@ -3464,19 +3372,30 @@ function generateReportCode(){
 function copyReportCode(){
   const ta = document.getElementById('reportCodeArea');
   if(!ta) return;
-  ta.select();
-  try{ document.execCommand('copy'); toast('已复制到剪贴板'); }
-  catch(e){ toast('请手动选中复制'); }
+  const text = ta.value;
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).then(()=>toast('已复制到剪贴板')).catch(()=>fallbackCopy(ta));
+  } else {
+    fallbackCopy(ta);
+  }
 }
 function parseReportCode(code){
   try{
     if(!code || !code.startsWith('TR')) return null;
     const payload = code.substring(2);
+    // Try LZ compressed first
     const json = lzDecompress(payload);
-    if(!json) return null;
-    const data = JSON.parse(json);
-    if(!data.uid) return null;
-    return data;
+    if(json){
+      const data = JSON.parse(json);
+      if(data.uid) return data;
+    }
+    // Fallback: Base64
+    try{
+      const b64json = decodeURIComponent(escape(atob(payload)));
+      const data = JSON.parse(b64json);
+      if(data.uid) return data;
+    }catch(e2){}
+    return null;
   }catch(e){ return null; }
 }
 
@@ -3511,10 +3430,10 @@ function importReportCode(){
 function showImportReportModal(){
   const overlay = document.createElement('div');
   overlay.id = 'importReportModal';
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px';
+  overlay.className = 'modal-overlay';
   overlay.innerHTML = `
-    <div style="background:var(--card);border-radius:12px;padding:24px;max-width:480px;width:100%;box-shadow:0 8px 32px rgba(0,0,0,.2)">
-      <h3 style="margin:0 0 12px">📥 导入用户上报数据</h3>
+    <div class="modal-card">
+      <div class="modal-title">📥 导入用户上报数据</div>
       <p style="font-size:.85rem;color:var(--muted);margin:0 0 12px">将用户发来的练习上报码粘贴到下方，导入后数据将加入数据看板。</p>
       <textarea id="importReportCodeArea" placeholder="粘贴练习上报码（以 TR 开头）…" style="width:100%;height:100px;padding:10px;border:1px solid var(--rule);border-radius:8px;font-size:.82rem;font-family:monospace;resize:none;background:var(--bg);color:var(--ink)"></textarea>
       <div id="reportImportErr" style="color:var(--danger);font-size:.82rem;margin-top:6px;min-height:20px"></div>
@@ -4474,35 +4393,37 @@ function generateAccountDeployCode(){
 function parseAccountDeployCode(code){
   try{
     if(!code || !code.startsWith('TA')) return null;
-    // Try v2: LZ compressed first
     const payload = code.substring(2);
-    if(payload.length < 200){
-      const json = lzDecompress(payload);
-      if(json){
-        const data = JSON.parse(json);
-        if(data.users) return data;
-      }
+    // Try LZ compressed first
+    const json = lzDecompress(payload);
+    if(json){
+      const data = JSON.parse(json);
+      if(data.users) return data;
     }
-    // Fallback v1: Base64
-    const json = decodeURIComponent(escape(atob(payload)));
-    const data = JSON.parse(json);
-    if(!data.users) return null;
-    return data;
+    // Fallback: Base64 (legacy v1)
+    try{
+      const b64json = decodeURIComponent(escape(atob(payload)));
+      const data = JSON.parse(b64json);
+      if(data.users) return data;
+    }catch(e2){}
+    return null;
   }catch(e){ return null; }
 }
 function showAccountDeployModal(){
   const code = generateAccountDeployCode();
   const userCount = Object.keys(store.users).length;
   const overlay = document.createElement('div');
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px';
+  overlay.id = 'accountDeployModal';
+  overlay.className = 'modal-overlay';
   overlay.innerHTML = `
-    <div style="background:var(--card);border-radius:12px;padding:24px;max-width:500px;width:100%;box-shadow:0 8px 32px rgba(0,0,0,.2)">
-      <h3 style="margin:0 0 12px">📤 账号部署码</h3>
+    <div class="modal-card">
+      <div class="modal-title">📤 账号部署码</div>
       <p style="font-size:.85rem;color:var(--muted);margin:0 0 12px">包含 ${userCount} 个账号（管理员+普通用户）。将此码发给新用户，他们在登录页点「导入账号码」粘贴后即可用你设置的密码登录。</p>
       <textarea id="deployCodeArea" readonly style="width:100%;height:120px;padding:10px;border:1px solid var(--rule);border-radius:8px;font-size:.72rem;font-family:monospace;resize:none;background:var(--bg);color:var(--ink)">${code}</textarea>
+      <p style="font-size:.75rem;color:var(--muted);margin-top:6px;text-align:right">长度：${code.length} 字符</p>
       <div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end">
         <button onclick="copyDeployCode()" style="padding:8px 18px;border-radius:8px;background:var(--accent);color:#fff;border:none;cursor:pointer">📋 复制部署码</button>
-        <button onclick="this.closest('div[style*=fixed]').remove()" style="padding:8px 18px;border-radius:8px;border:1px solid var(--rule);background:var(--card);color:var(--muted);cursor:pointer">关闭</button>
+        <button onclick="document.getElementById('accountDeployModal').remove()" style="padding:8px 18px;border-radius:8px;border:1px solid var(--rule);background:var(--card);color:var(--muted);cursor:pointer">关闭</button>
       </div>
     </div>
   `;
@@ -4511,21 +4432,21 @@ function showAccountDeployModal(){
 }
 function copyDeployCode(){
   const ta = document.getElementById('deployCodeArea');
-  ta.select();
-  try{
-    document.execCommand('copy');
-    toast('已复制到剪贴板');
-  }catch(e){
-    toast('请手动选中复制');
+  if(!ta) return;
+  const text = ta.value;
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).then(()=>toast('已复制到剪贴板')).catch(()=>fallbackCopy(ta));
+  } else {
+    fallbackCopy(ta);
   }
 }
 function showImportAccountModal(){
   const overlay = document.createElement('div');
   overlay.id = 'importAccountOverlay';
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px';
+  overlay.className = 'modal-overlay';
   overlay.innerHTML = `
-    <div style="background:var(--card);border-radius:12px;padding:24px;max-width:500px;width:100%;box-shadow:0 8px 32px rgba(0,0,0,.2)">
-      <h3 style="margin:0 0 12px">📋 导入账号码</h3>
+    <div class="modal-card">
+      <div class="modal-title">📋 导入账号码</div>
       <p style="font-size:.85rem;color:var(--muted);margin:0 0 12px">将管理员发给你的账号部署码粘贴到下方，导入后即可用你的指令码登录。</p>
       <textarea id="importCodeArea" placeholder="粘贴账号部署码（以 TA 开头）…" style="width:100%;height:100px;padding:10px;border:1px solid var(--rule);border-radius:8px;font-size:.82rem;font-family:monospace;resize:none;background:var(--bg);color:var(--ink)"></textarea>
       <div id="importErr" style="color:#ef4444;font-size:.82rem;margin-top:6px;min-height:20px"></div>
@@ -4546,21 +4467,21 @@ function applyAccountDeploy(){
     errEl.textContent = '部署码无效，请检查是否完整复制';
     return;
   }
-  // Merge: replace existing users with deployed ones, keep admin if not in deploy
-  const newUsers = {};
+  // Merge: add/update users from deploy code, preserve existing user practice data
+  if(!store.users) store.users = {};
   Object.entries(data.users).forEach(([uid, u])=>{
-    newUsers[uid] = defaultUserObj(u.username, u.role, u.expireAt);
-    newUsers[uid].password = u.password;
-    if(u.createdAt) newUsers[uid].createdAt = u.createdAt;
+    if(store.users[uid]){
+      // Update account info but keep practice data
+      store.users[uid].username = u.username;
+      store.users[uid].password = u.password;
+      store.users[uid].role = u.role;
+      store.users[uid].expireAt = u.expireAt || 'never';
+    } else {
+      store.users[uid] = defaultUserObj(u.username, u.role, u.expireAt);
+      store.users[uid].password = u.password;
+      if(u.createdAt) store.users[uid].createdAt = u.createdAt;
+    }
   });
-  // If no admin in deploy code, keep local admin
-  const hasAdmin = Object.values(newUsers).some(u=>u.role==='admin');
-  if(!hasAdmin && store.users){
-    Object.entries(store.users).forEach(([uid,u])=>{
-      if(u.role==='admin') newUsers[uid] = u;
-    });
-  }
-  store.users = newUsers;
   store.loginState = { fails:0, lockedUntil:0 };
   saveStore(store);
   const overlay = document.getElementById('importAccountOverlay');
