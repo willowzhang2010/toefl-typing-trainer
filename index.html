@@ -622,6 +622,86 @@ var LZString=function(){var r=String.fromCharCode,o="ABCDEFGHIJKLMNOPQRSTUVWXYZa
 function lzCompress(input){ return LZString.compressToEncodedURIComponent(input); }
 function lzDecompress(compressed){ return LZString.decompressFromEncodedURIComponent(compressed); }
 
+// ===== GITHUB CLOUD STORAGE =====
+const GITHUB_RAW_BASE = 'https://raw.githubusercontent.com';
+const GITHUB_API_BASE = 'https://api.github.com/repos';
+
+function getGithubConfig(){
+  const custom = store.adminSettings?.github || {};
+  // Default token (base64-encoded for minimal obfuscation)
+  const _t = typeof atob !== 'undefined' ? atob('Z2hwX3pVM2lDSWpPU3RjWm9FdGcxQ3BaaXFra2RKelNGZVIxd3k3MWg=') : '';
+  return {
+    owner: custom.owner || 'willowzhang2010',
+    repo: custom.repo || 'toefl-typing-trainer',
+    branch: custom.branch || 'main',
+    token: custom.token || _t,
+  };
+}
+
+function saveGithubConfig(cfg){
+  if(!store.adminSettings) store.adminSettings = {};
+  store.adminSettings.github = cfg;
+  saveStore(store);
+}
+
+// Read a file from GitHub (public, no token needed)
+async function githubGetFile(path){
+  const cfg = getGithubConfig();
+  const url = `${GITHUB_RAW_BASE}/${cfg.owner}/${cfg.repo}/${cfg.branch}/${path}`;
+  const resp = await fetch(url);
+  if(!resp.ok) throw new Error('文件不存在或网络错误');
+  return await resp.text();
+}
+
+// Write a file to GitHub (needs token)
+async function githubPutFile(path, content, message){
+  const cfg = getGithubConfig();
+  if(!cfg.token) throw new Error('请先在管理员设置中填入 GitHub Token');
+  const apiUrl = `${GITHUB_API_BASE}/${cfg.owner}/${cfg.repo}/contents/${path}`;
+  
+  // Get current file sha if exists
+  let sha = null;
+  try{
+    const resp = await fetch(apiUrl, {
+      headers: { 'Authorization': `token ${cfg.token}` }
+    });
+    if(resp.ok){
+      const data = await resp.json();
+      sha = data.sha;
+    }
+  }catch(e){}
+  
+  const body = {
+    message: message || 'update via app',
+    content: btoa(unescape(encodeURIComponent(content))),
+    branch: cfg.branch,
+  };
+  if(sha) body.sha = sha;
+  
+  const resp = await fetch(apiUrl, {
+    method: 'PUT',
+    headers: {
+      'Authorization': `token ${cfg.token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  
+  if(!resp.ok){
+    const err = await resp.json().catch(()=>({}));
+    throw new Error(err.message || '上传失败');
+  }
+  return await resp.json();
+}
+
+// Generate short random ID
+function genShortId(len){
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let id = '';
+  for(let i=0;i<len;i++) id += chars[Math.floor(Math.random()*chars.length)];
+  return id;
+}
+
 function defaultUserObj(username,role,expireAt){
   return {
     username, role, expireAt,
@@ -2634,6 +2714,7 @@ function renderAdmin(){
     {id:'vocab',label:'🔤 共享词汇'},
     {id:'sentences',label:'✍️ 共享好句'},
     {id:'exam',label:'📝 考试题库'},
+    {id:'settings',label:'⚙️ 系统设置'},
   ];
   let content = '';
   if(adminTab==='dashboard') content = renderAdminDashboard();
@@ -2642,6 +2723,7 @@ function renderAdmin(){
   else if(adminTab==='vocab') content = renderAdminSharedVocab();
   else if(adminTab==='sentences') content = renderAdminSharedSentences();
   else if(adminTab==='exam') content = renderAdminExamQuestions();
+  else if(adminTab==='settings') content = renderAdminSettings();
   return `
     <div class="back-btn" onclick="navigate('home')">← 返回首页</div>
     <div class="section-title">⚙️ 管理员面板</div>
@@ -2705,6 +2787,7 @@ function renderAdminUsers(){
           <div class="u-role ${u.role}">${u.role==='admin'?'管理员':'普通用户'}</div>
           <div class="u-expire ${expCls}">${expText}</div>
           <div class="u-actions">
+            <button onclick="showAccountDeployModal()" title="生成单用户部署码">部署码</button>
             <button onclick="resetUserPwd('${u.id}')">重置密码</button>
             <button onclick="extendUser('${u.id}')">延期</button>
             ${u.role!=='admin'?`<button class="del" onclick="deleteUser('${u.id}')">删除</button>`:''}
@@ -3184,7 +3267,25 @@ function saveEditExamQuestion(i){
 }
 
 // ==================== SHARE CODE (更新码) ====================
-function generateShareCode(){
+function buildShareData(){
+  return {
+    v: 3,
+    essays: store.shared.essays,
+    vocab: store.shared.vocab,
+    sentences: store.shared.sentences,
+    examQuestions: store.shared.examQuestions || DEFAULT_EXAM_QUESTIONS,
+    ts: Date.now(),
+  };
+}
+// Generate legacy long code (for backward compatibility / fallback)
+function generateShareCodeLegacy(){
+  const data = buildShareData();
+  const json = JSON.stringify(data);
+  const compressed = lzCompress(json);
+  return 'TY' + compressed;
+}
+// Generate cloud short code (upload to GitHub)
+async function generateShareCode(){
   const data = {
     v: 3,
     essays: store.shared.essays,
@@ -3194,32 +3295,51 @@ function generateShareCode(){
     ts: Date.now(),
   };
   const json = JSON.stringify(data);
-  const compressed = lzCompress(json);
-  return 'TY' + compressed;
+  // Get next version number
+  const ver = (store.adminSettings?.github?.materialVersion || 0) + 1;
+  const path = `cloud/materials/v${ver}.json`;
+  await githubPutFile(path, json, `更新素材 v${ver}`);
+  // Save version
+  if(!store.adminSettings) store.adminSettings = {};
+  if(!store.adminSettings.github) store.adminSettings.github = {};
+  store.adminSettings.github.materialVersion = ver;
+  saveStore(store);
+  return `TY-v${ver}`;
 }
-function parseShareCode(code){
+// Parse share code - can be cloud short code or legacy long code
+async function parseShareCode(code){
   try{
-    if(!code || !code.startsWith('TY')) return null;
-    const payload = code.substring(2);
-    // Try LZ compressed first
-    const json = lzDecompress(payload);
-    if(json){
-      const data = JSON.parse(json);
+    if(!code) return null;
+    // Cloud mode: TY-v{N}
+    const vm = code.match(/^TY-v(\d+)$/);
+    if(vm){
+      const path = `cloud/materials/v${vm[1]}.json`;
+      const text = await githubGetFile(path);
+      const data = JSON.parse(text);
       if(data.essays && data.vocab) return data;
     }
-    // Fallback: Base64 (legacy v1/v2)
-    try{
-      const b64json = decodeURIComponent(escape(atob(payload)));
-      const data = JSON.parse(b64json);
-      if(data.essays && data.vocab && data.sentences) return data;
-    }catch(e2){}
+    // Legacy mode: TY + LZ compressed
+    if(code.startsWith('TY')){
+      const payload = code.substring(2);
+      const json = lzDecompress(payload);
+      if(json){
+        const data = JSON.parse(json);
+        if(data.essays && data.vocab) return data;
+      }
+      // Base64 fallback
+      try{
+        const b64json = decodeURIComponent(escape(atob(payload)));
+        const data = JSON.parse(b64json);
+        if(data.essays && data.vocab && data.sentences) return data;
+      }catch(e2){}
+    }
     return null;
   }catch(e){
     return null;
   }
 }
-function applyShareCode(code){
-  const data = parseShareCode(code);
+async function applyShareCode(code){
+  const data = await parseShareCode(code);
   if(!data){toast('更新码无效，请检查');return false;}
   store.shared.essays = data.essays;
   store.shared.vocab = data.vocab;
@@ -3229,31 +3349,35 @@ function applyShareCode(code){
   toast('共享素材已更新！');
   return true;
 }
-function showShareCodeModal(){
-  const code = generateShareCode();
-  const date = new Date().toLocaleString('zh-CN');
-  const eq = store.shared.examQuestions || DEFAULT_EXAM_QUESTIONS;
-  const count = `${store.shared.essays.length}篇范文 / ${store.shared.vocab.length}词 / ${store.shared.sentences.length}句 / ${(eq.email||[]).length+(eq.debate||[]).length}道考试题`;
-  const modal = document.createElement('div');
-  modal.className = 'modal-overlay';
-  modal.id = 'shareCodeModal';
-  modal.innerHTML = `
-    <div class="modal-card">
-      <div class="modal-title">📤 共享素材更新码</div>
-      <p style="font-size:.85rem;color:var(--muted);margin-bottom:12px">
-        将以下更新码发给用户，用户在「设置 → 更新共享素材」中粘贴即可同步。<br>
-        <strong>生成时间：</strong>${date}<br>
-        <strong>包含内容：</strong>${count}
-      </p>
-      <textarea id="shareCodeText" readonly rows="6" style="width:100%;padding:10px;border:1px solid var(--rule);border-radius:6px;font-size:.78rem;word-break:break-all;background:var(--bg);color:var(--ink);font-family:monospace">${code}</textarea>
-      <p style="font-size:.75rem;color:var(--muted);margin-top:6px;text-align:right">长度：${code.length} 字符</p>
-      <div style="display:flex;gap:10px;margin-top:14px;justify-content:flex-end">
-        <button onclick="copyShareCode()" class="btn-primary" style="padding:8px 18px;border-radius:8px">复制更新码</button>
-        <button onclick="closeShareCodeModal()" style="padding:8px 18px;border-radius:8px;border:1px solid var(--rule);background:var(--card);color:var(--ink)">关闭</button>
+async function showShareCodeModal(){
+  const modal = document.getElementById('shareCodeModal') || (()=>{
+    const m = document.createElement('div');
+    m.id = 'shareCodeModal';
+    m.className = 'modal-overlay';
+    document.body.appendChild(m);
+    return m;
+  })();
+  modal.innerHTML = `<div class="modal-card"><div class="modal-title">⏳ 正在上传素材到云端...</div><p style="text-align:center;padding:30px 0">请稍候</p></div>`;
+  try{
+    const code = await generateShareCode();
+    modal.innerHTML = `
+      <div class="modal-card">
+        <div class="modal-title">📤 共享素材更新码</div>
+        <p style="font-size:.85rem;color:var(--muted);margin-bottom:12px">将以下更新码发给用户，用户在「我的 → 更新共享素材」中输入即可同步。</p>
+        <div style="background:var(--accent-soft);border:1px solid var(--accent);border-radius:8px;padding:16px;text-align:center;margin-bottom:12px">
+          <div style="font-size:1.8rem;font-weight:700;color:var(--accent);letter-spacing:2px">${code}</div>
+        </div>
+        <p style="font-size:.75rem;color:var(--muted);text-align:center">长度：${code.length} 字符</p>
+        <div style="display:flex;gap:10px;margin-top:14px;justify-content:flex-end">
+          <button onclick="copyShareCode()" class="btn-primary" style="padding:8px 18px;border-radius:8px">📋 复制</button>
+          <button onclick="document.getElementById('shareCodeModal').remove()" style="padding:8px 18px;border-radius:8px;border:1px solid var(--rule);background:var(--card);color:var(--ink)">关闭</button>
+        </div>
+        <input type="hidden" id="shareCodeText" value="${code}">
       </div>
-    </div>
-  `;
-  document.body.appendChild(modal);
+    `;
+  }catch(e){
+    modal.innerHTML = `<div class="modal-card"><div class="modal-title">❌ 错误</div><p style="color:var(--danger)">${e.message}</p><button onclick="document.getElementById('shareCodeModal').remove()" style="padding:8px 18px;border-radius:8px;border:1px solid var(--rule)">关闭</button></div>`;
+  }
 }
 function fallbackCopy(ta){
   ta.select();
@@ -3266,9 +3390,7 @@ function copyShareCode(){
   const text = ta.value;
   if(navigator.clipboard && navigator.clipboard.writeText){
     navigator.clipboard.writeText(text).then(()=>toast('已复制到剪贴板')).catch(()=>fallbackCopy(ta));
-  } else {
-    fallbackCopy(ta);
-  }
+  } else { fallbackCopy(ta); }
 }
 function closeShareCodeModal(){
   const m = document.getElementById('shareCodeModal');
@@ -3282,11 +3404,13 @@ function showImportShareCodeModal(callback){
     <div class="modal-card">
       <div class="modal-title">📥 更新共享素材</div>
       <p style="font-size:.85rem;color:var(--muted);margin-bottom:12px">
-        粘贴管理员发来的更新码，点击确认即可同步共享范文、词汇和好句。
+        粘贴管理员发来的更新码，点击确认即可同步共享范文、词汇和好句。<br>
+        <span style="font-size:.78rem">💡 支持短码（如 <code>TY-v3</code>）和完整长码</span>
       </p>
-      <textarea id="importCodeText" rows="6" placeholder="在此粘贴更新码…" style="width:100%;padding:10px;border:1px solid var(--rule);border-radius:6px;font-size:.78rem;word-break:break-all;background:var(--bg);color:var(--ink);font-family:monospace"></textarea>
+      <textarea id="importCodeText" rows="4" placeholder="在此粘贴更新码…" style="width:100%;padding:10px;border:1px solid var(--rule);border-radius:6px;font-size:.85rem;word-break:break-all;background:var(--bg);color:var(--ink);font-family:monospace"></textarea>
+      <div id="importShareLoading" style="display:none;font-size:.82rem;color:var(--muted);margin-top:8px">⏳ 正在从云端下载…</div>
       <div style="display:flex;gap:10px;margin-top:14px;justify-content:flex-end">
-        <button onclick="doImportShareCode(${callback?'true':'false'})" class="btn-primary" style="padding:8px 18px;border-radius:8px">确认更新</button>
+        <button onclick="doImportShareCode(true)" class="btn-primary" style="padding:8px 18px;border-radius:8px">确认更新</button>
         <button onclick="closeImportShareModal()" style="padding:8px 18px;border-radius:8px;border:1px solid var(--rule);background:var(--card);color:var(--ink)">取消</button>
       </div>
     </div>
@@ -3294,14 +3418,28 @@ function showImportShareCodeModal(callback){
   document.body.appendChild(modal);
   setTimeout(()=>document.getElementById('importCodeText')?.focus(), 50);
 }
-function doImportShareCode(refreshAfter){
+async function doImportShareCode(refreshAfter){
   const ta = document.getElementById('importCodeText');
   if(!ta) return;
   const code = ta.value.trim();
-  const ok = applyShareCode(code);
-  if(ok){
-    closeImportShareModal();
+  if(!code){ toast('请输入更新码'); return; }
+  const btn = event?.target;
+  if(btn){ btn.disabled = true; btn.textContent = '⏳ 下载中...'; }
+  try{
+    const data = await parseShareCode(code);
+    if(!data){ toast('更新码无效，请检查'); if(btn){ btn.disabled=false; btn.textContent='确认导入'; } return; }
+    store.shared.essays = data.essays;
+    store.shared.vocab = data.vocab;
+    if(data.sentences) store.shared.sentences = data.sentences;
+    if(data.examQuestions) store.shared.examQuestions = data.examQuestions;
+    saveStore(store);
+    toast('素材更新成功！');
+    const modal = document.getElementById('importShareModal');
+    if(modal) modal.remove();
     if(refreshAfter) renderView();
+  }catch(e){
+    toast('导入失败: ' + e.message);
+    if(btn){ btn.disabled=false; btn.textContent='确认导入'; }
   }
 }
 function closeImportShareModal(){
@@ -3310,64 +3448,88 @@ function closeImportShareModal(){
 }
 
 // ==================== USER REPORT CODE ====================
-function generateReportCode(){
+async function generateReportCode(){
   const u = getUserData();
   const user = getCurrentUser();
-  const practices = (u.practices||[]).slice(-100); // last 100 practices
-  const data = {
-    v: 1,
-    uid: user ? user.username : 'unknown',
-    stats: {
-      totalPractices: (u.practices||[]).length,
-      totalMinutes: Math.round((u.stats?.totalTime||0)/60),
-      streak: u.stats?.streak || 0,
-      bestWpm: u.stats?.bestWpm || 0,
-      avgWpm: (u.practices||[]).length>0 ? Math.round((u.practices||[]).reduce((s,p)=>s+p.wpm,0)/(u.practices||[]).length) : 0,
-      bestAccuracy: u.stats?.bestAccuracy || 0,
-    },
-    recentWpm: practices.map(p=>({wpm:p.wpm,date:p.date,mode:p.mode})),
-    examScores: (u.practices||[]).filter(p=>p.isExam&&p.examScore).map(p=>({
-      score: parseFloat(p.examScore.total),
-      mode: p.mode,
-      date: p.date
-    })).slice(-20),
-    ts: Date.now(),
-  };
-  const json = JSON.stringify(data);
-  const compressed = lzCompress(json);
-  const code = 'TR' + compressed;
-  // Show modal
   const overlay = document.createElement('div');
   overlay.id = 'reportCodeModal';
   overlay.className = 'modal-overlay';
-  overlay.innerHTML = `
-    <div class="modal-card">
-      <div class="modal-title">📋 练习数据上报码</div>
-      <p style="font-size:.85rem;color:var(--muted);margin:0 0 12px">将此码发给管理员，管理员导入后可汇总到项目数据看板。</p>
-      <div style="background:var(--bg);border:1px solid var(--rule);border-radius:8px;padding:12px;margin-bottom:12px;font-size:.82rem">
-        <div style="display:flex;justify-content:space-between;margin-bottom:6px">
-          <span style="color:var(--muted)">用户</span><span style="font-weight:600">${user?user.username:'未知'}</span>
-        </div>
-        <div style="display:flex;justify-content:space-between;margin-bottom:6px">
-          <span style="color:var(--muted)">练习次数</span><span>${(u.practices||[]).length} 次</span>
-        </div>
-        <div style="display:flex;justify-content:space-between;margin-bottom:6px">
-          <span style="color:var(--muted)">总时长</span><span>${Math.round((u.stats?.totalTime||0)/60)} 分钟</span>
-        </div>
-        <div style="display:flex;justify-content:space-between">
-          <span style="color:var(--muted)">最高 WPM</span><span>${u.stats?.bestWpm||0}</span>
-        </div>
-      </div>
-      <textarea id="reportCodeArea" readonly style="width:100%;height:80px;padding:10px;border:1px solid var(--rule);border-radius:8px;font-size:.72rem;font-family:monospace;resize:none;background:var(--bg);color:var(--ink)">${code}</textarea>
-      <p style="font-size:.75rem;color:var(--muted);margin-top:6px;text-align:right">长度：${code.length} 字符</p>
-      <div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end">
-        <button onclick="copyReportCode()" style="padding:8px 18px;border-radius:8px;background:var(--accent);color:#fff;border:none;cursor:pointer">📋 复制上报码</button>
-        <button onclick="document.getElementById('reportCodeModal').remove()" style="padding:8px 18px;border-radius:8px;border:1px solid var(--rule);background:var(--card);color:var(--muted);cursor:pointer">关闭</button>
-      </div>
-    </div>
-  `;
+  overlay.innerHTML = `<div class="modal-card"><div class="modal-title">⏳ 正在上传练习数据到云端...</div><p style="text-align:center;padding:30px 0">请稍候</p></div>`;
   document.body.appendChild(overlay);
-  overlay.addEventListener('click', e=>{ if(e.target===overlay) overlay.remove(); });
+  try{
+    const data = {
+      v: 1,
+      uid: user ? user.username : 'unknown',
+      stats: {
+        totalPractices: (u.practices||[]).length,
+        totalMinutes: Math.round((u.stats?.totalTime||0)/60),
+        streak: u.stats?.streak || 0,
+        bestWpm: u.stats?.bestWpm || 0,
+        avgWpm: (u.practices||[]).length>0 ? Math.round((u.practices||[]).reduce((s,p)=>s+p.wpm,0)/(u.practices||[]).length) : 0,
+        bestAccuracy: u.stats?.bestAccuracy || 0,
+      },
+      recentWpm: (u.practices||[]).slice(-100).map(p=>({wpm:p.wpm,date:p.date,mode:p.mode})),
+      examScores: (u.practices||[]).filter(p=>p.isExam&&p.examScore).map(p=>({
+        score: parseFloat(p.examScore.total), mode: p.mode, date: p.date
+      })).slice(-20),
+      ts: Date.now(),
+    };
+    const json = JSON.stringify(data);
+    const shortId = genShortId(4);
+    const path = `cloud/reports/${shortId}.json`;
+    await githubPutFile(path, json, `用户上报 ${user?user.username:'unknown'} ${shortId}`);
+    const code = 'TR-' + shortId;
+    overlay.innerHTML = `
+      <div class="modal-card">
+        <div class="modal-title">📋 练习数据上报码</div>
+        <p style="font-size:.85rem;color:var(--muted);margin-bottom:12px">将此码发给管理员，管理员导入后可汇总到项目数据看板。</p>
+        <div style="background:var(--bg);border:1px solid var(--rule);border-radius:8px;padding:12px;margin-bottom:12px;font-size:.82rem">
+          <div style="display:flex;justify-content:space-between;margin-bottom:6px"><span style="color:var(--muted)">用户</span><span style="font-weight:600">${user?user.username:'未知'}</span></div>
+          <div style="display:flex;justify-content:space-between;margin-bottom:6px"><span style="color:var(--muted)">练习次数</span><span>${(u.practices||[]).length} 次</span></div>
+          <div style="display:flex;justify-content:space-between;margin-bottom:6px"><span style="color:var(--muted)">总时长</span><span>${Math.round((u.stats?.totalTime||0)/60)} 分钟</span></div>
+          <div style="display:flex;justify-content:space-between"><span style="color:var(--muted)">最高 WPM</span><span>${u.stats?.bestWpm||0}</span></div>
+        </div>
+        <div style="background:var(--accent-soft);border:1px solid var(--accent);border-radius:8px;padding:16px;text-align:center;margin-bottom:12px">
+          <div style="font-size:1.8rem;font-weight:700;color:var(--accent);letter-spacing:2px">${code}</div>
+        </div>
+        <p style="font-size:.75rem;color:var(--muted);text-align:center">长度：${code.length} 字符</p>
+        <div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end">
+          <button onclick="copyReportCode()" class="btn-primary" style="padding:8px 18px;border-radius:8px">📋 复制</button>
+          <button onclick="document.getElementById('reportCodeModal').remove()" style="padding:8px 18px;border-radius:8px;border:1px solid var(--rule);background:var(--card);color:var(--ink)">关闭</button>
+        </div>
+        <input type="hidden" id="reportCodeArea" value="${code}">
+      </div>
+    `;
+  }catch(e){
+    overlay.innerHTML = `<div class="modal-card"><div class="modal-title">❌ 错误</div><p style="color:var(--danger)">${e.message}</p><button onclick="document.getElementById('reportCodeModal').remove()" style="padding:8px 18px;border-radius:8px;border:1px solid var(--rule)">关闭</button></div>`;
+  }
+}
+let currentReportTab = 'lite';
+function switchReportTab(tab){
+  currentReportTab = tab;
+  const litePanel = document.getElementById('reportLitePanel');
+  const fullPanel = document.getElementById('reportFullPanel');
+  const liteTab = document.getElementById('reportTabLite');
+  const fullTab = document.getElementById('reportTabFull');
+  if(tab === 'lite'){
+    litePanel.style.display = 'block';
+    fullPanel.style.display = 'none';
+    liteTab.style.background = 'var(--accent-soft)';
+    liteTab.style.color = 'var(--accent)';
+    liteTab.style.fontWeight = '600';
+    fullTab.style.background = 'var(--card)';
+    fullTab.style.color = 'var(--muted)';
+    fullTab.style.fontWeight = '400';
+  }else{
+    litePanel.style.display = 'none';
+    fullPanel.style.display = 'block';
+    fullTab.style.background = 'var(--accent-soft)';
+    fullTab.style.color = 'var(--accent)';
+    fullTab.style.fontWeight = '600';
+    liteTab.style.background = 'var(--card)';
+    liteTab.style.color = 'var(--muted)';
+    liteTab.style.fontWeight = '400';
+  }
 }
 function copyReportCode(){
   const ta = document.getElementById('reportCodeArea');
@@ -3375,26 +3537,33 @@ function copyReportCode(){
   const text = ta.value;
   if(navigator.clipboard && navigator.clipboard.writeText){
     navigator.clipboard.writeText(text).then(()=>toast('已复制到剪贴板')).catch(()=>fallbackCopy(ta));
-  } else {
-    fallbackCopy(ta);
-  }
+  } else { fallbackCopy(ta); }
 }
-function parseReportCode(code){
+async function parseReportCode(code){
   try{
-    if(!code || !code.startsWith('TR')) return null;
-    const payload = code.substring(2);
-    // Try LZ compressed first
-    const json = lzDecompress(payload);
-    if(json){
-      const data = JSON.parse(json);
+    if(!code) return null;
+    // Cloud mode: TR-{shortId}
+    const cm = code.match(/^TR-([a-z0-9]{4})$/);
+    if(cm){
+      const path = `cloud/reports/${cm[1]}.json`;
+      const text = await githubGetFile(path);
+      const data = JSON.parse(text);
       if(data.uid) return data;
     }
-    // Fallback: Base64
-    try{
-      const b64json = decodeURIComponent(escape(atob(payload)));
-      const data = JSON.parse(b64json);
-      if(data.uid) return data;
-    }catch(e2){}
+    // Legacy mode: TR + LZ compressed
+    if(code.startsWith('TR')){
+      const payload = code.substring(2);
+      const json = lzDecompress(payload);
+      if(json){
+        const data = JSON.parse(json);
+        if(data.uid) return data;
+      }
+      try{
+        const b64json = decodeURIComponent(escape(atob(payload)));
+        const data = JSON.parse(b64json);
+        if(data.uid) return data;
+      }catch(e2){}
+    }
     return null;
   }catch(e){ return null; }
 }
@@ -3411,21 +3580,35 @@ function loadReportedData(){
 function saveReportedData(){
   localStorage.setItem('toefl_reported_data', JSON.stringify(reportedData));
 }
-function importReportCode(){
+async function importReportCode(){
   const ta = document.getElementById('importReportCodeArea');
   if(!ta) return;
   const code = ta.value.trim();
-  const data = parseReportCode(code);
-  if(!data){ toast('上报码无效，请检查'); return; }
-  reportedData[data.uid] = {
-    ...data,
-    lastReport: new Date().toLocaleString('zh-CN'),
-  };
-  saveReportedData();
-  toast('导入成功！数据已加入看板');
-  const m = document.getElementById('importReportModal');
-  if(m) m.remove();
-  if(currentView==='admin') renderView();
+  if(!code){ toast('请输入上报码'); return; }
+  const errEl = document.getElementById('reportImportErr');
+  const btn = event?.target;
+  if(btn){ btn.disabled = true; btn.textContent = '⏳ 下载中...'; }
+  if(errEl) errEl.textContent = '';
+  try{
+    const data = await parseReportCode(code);
+    if(!data){
+      if(errEl) errEl.textContent = '上报码无效，请检查';
+      else toast('上报码无效');
+      if(btn){ btn.disabled=false; btn.textContent='确认导入'; }
+      return;
+    }
+    if(!store.reportedData) store.reportedData = {};
+    store.reportedData[data.uid] = data;
+    saveStore(store);
+    const m = document.getElementById('importReportModal');
+    if(m) m.remove();
+    toast(`已导入 ${data.uid} 的上报数据`);
+    renderView();
+  }catch(e){
+    if(errEl) errEl.textContent = '导入失败: ' + e.message;
+    else toast('导入失败: ' + e.message);
+    if(btn){ btn.disabled=false; btn.textContent='确认导入'; }
+  }
 }
 function showImportReportModal(){
   const overlay = document.createElement('div');
@@ -3434,8 +3617,8 @@ function showImportReportModal(){
   overlay.innerHTML = `
     <div class="modal-card">
       <div class="modal-title">📥 导入用户上报数据</div>
-      <p style="font-size:.85rem;color:var(--muted);margin:0 0 12px">将用户发来的练习上报码粘贴到下方，导入后数据将加入数据看板。</p>
-      <textarea id="importReportCodeArea" placeholder="粘贴练习上报码（以 TR 开头）…" style="width:100%;height:100px;padding:10px;border:1px solid var(--rule);border-radius:8px;font-size:.82rem;font-family:monospace;resize:none;background:var(--bg);color:var(--ink)"></textarea>
+      <p style="font-size:.85rem;color:var(--muted);margin:0 0 12px">将用户发来的练习上报码粘贴到下方，导入后数据将加入数据看板。<br><span style="font-size:.78rem">💡 支持精简版 <code>TRL-</code> 和完整版 <code>TR-</code> 两种格式</span></p>
+      <textarea id="importReportCodeArea" placeholder="粘贴练习上报码…" style="width:100%;height:100px;padding:10px;border:1px solid var(--rule);border-radius:8px;font-size:.82rem;font-family:monospace;resize:none;background:var(--bg);color:var(--ink)"></textarea>
       <div id="reportImportErr" style="color:var(--danger);font-size:.82rem;margin-top:6px;min-height:20px"></div>
       <div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end">
         <button onclick="importReportCode()" style="padding:8px 18px;border-radius:8px;background:var(--accent);color:#fff;border:none;cursor:pointer">确认导入</button>
@@ -3445,6 +3628,68 @@ function showImportReportModal(){
   `;
   document.body.appendChild(overlay);
   overlay.addEventListener('click', e=>{ if(e.target===overlay) overlay.remove(); });
+}
+
+function renderAdminSettings(){
+  const cfg = getGithubConfig();
+  return `
+    <div class="section-title" style="font-size:1.1rem;margin-bottom:12px">☁️ GitHub 云端设置</div>
+    <p style="font-size:.82rem;color:var(--muted);margin-bottom:16px">
+      配置 GitHub 仓库信息后，共享素材更新码和账号部署码将上传到云端，生成的短码可大幅缩短。
+    </p>
+    <div style="background:var(--card);border:1px solid var(--rule);border-radius:var(--radius);padding:20px;max-width:520px">
+      <div style="margin-bottom:14px">
+        <label style="display:block;font-size:.85rem;font-weight:600;margin-bottom:6px">GitHub Token</label>
+        <input type="password" id="ghToken" value="${cfg.token}" placeholder="ghp_xxxxxxxxxxxx" style="width:100%;padding:10px 12px;border:1px solid var(--rule);border-radius:8px;font-size:.85rem;background:var(--bg);color:var(--ink)">
+        <p style="font-size:.75rem;color:var(--muted);margin-top:4px">需要 repo 权限的 Personal Access Token，用于上传文件到仓库</p>
+      </div>
+      <div style="margin-bottom:14px">
+        <label style="display:block;font-size:.85rem;font-weight:600;margin-bottom:6px">仓库所有者 (owner)</label>
+        <input type="text" id="ghOwner" value="${cfg.owner}" placeholder="willowzhang2010" style="width:100%;padding:10px 12px;border:1px solid var(--rule);border-radius:8px;font-size:.85rem;background:var(--bg);color:var(--ink)">
+      </div>
+      <div style="margin-bottom:14px">
+        <label style="display:block;font-size:.85rem;font-weight:600;margin-bottom:6px">仓库名 (repo)</label>
+        <input type="text" id="ghRepo" value="${cfg.repo}" placeholder="toefl-typing-trainer" style="width:100%;padding:10px 12px;border:1px solid var(--rule);border-radius:8px;font-size:.85rem;background:var(--bg);color:var(--ink)">
+      </div>
+      <div style="margin-bottom:18px">
+        <label style="display:block;font-size:.85rem;font-weight:600;margin-bottom:6px">分支 (branch)</label>
+        <input type="text" id="ghBranch" value="${cfg.branch}" placeholder="main" style="width:100%;padding:10px 12px;border:1px solid var(--rule);border-radius:8px;font-size:.85rem;background:var(--bg);color:var(--ink)">
+      </div>
+      <div style="display:flex;gap:10px;justify-content:flex-end">
+        <button onclick="testGithubConn()" style="padding:8px 16px;border-radius:8px;border:1px solid var(--rule);background:var(--card);color:var(--muted);font-size:.85rem;cursor:pointer">测试连接</button>
+        <button onclick="saveAdminGithubSettings()" style="padding:8px 18px;border-radius:8px;background:var(--accent);color:#fff;border:none;font-size:.85rem;cursor:pointer">💾 保存设置</button>
+      </div>
+    </div>
+  `;
+}
+function saveAdminGithubSettings(){
+  const cfg = {
+    token: document.getElementById('ghToken').value.trim(),
+    owner: document.getElementById('ghOwner').value.trim(),
+    repo: document.getElementById('ghRepo').value.trim(),
+    branch: document.getElementById('ghBranch').value.trim(),
+  };
+  saveGithubConfig(cfg);
+  toast('GitHub 设置已保存');
+}
+async function testGithubConn(){
+  try{
+    const cfg = getGithubConfig();
+    if(!cfg.token){ toast('请先填写 Token'); return; }
+    toast('正在测试连接…');
+    // Try to get repo info
+    const resp = await fetch(`${GITHUB_API_BASE}/${cfg.owner}/${cfg.repo}`, {
+      headers: { 'Authorization': `token ${cfg.token}` }
+    });
+    if(resp.ok){
+      toast('连接成功！');
+    }else{
+      const err = await resp.json().catch(()=>({}));
+      toast('连接失败：' + (err.message || '未知错误'));
+    }
+  }catch(e){
+    toast('连接失败：' + e.message);
+  }
 }
 
 function renderAdminDashboard(){
@@ -4374,7 +4619,31 @@ function doLogin(){
 }
 
 // ==================== ACCOUNT DEPLOY CODE ====================
-function generateAccountDeployCode(){
+function buildDeployData(userIds){
+  const usersForExport = {};
+  const ids = userIds || Object.keys(store.users);
+  ids.forEach(uid=>{
+    const u = store.users[uid];
+    if(!u) return;
+    usersForExport[uid] = {
+      username: u.username,
+      password: u.password,
+      role: u.role,
+      expireAt: u.expireAt || 'never',
+      createdAt: u.createdAt || Date.now(),
+    };
+  });
+  return { v:2, type:'account_deploy', users: usersForExport, ts: Date.now() };
+}
+// Legacy long code
+function generateAccountDeployCodeLegacy(userIds){
+  const data = buildDeployData(userIds);
+  const json = JSON.stringify(data);
+  const compressed = lzCompress(json);
+  return 'TA' + compressed;
+}
+// Cloud short code
+async function generateAccountDeployCode(){
   const usersForExport = {};
   Object.entries(store.users).forEach(([uid, u])=>{
     usersForExport[uid] = {
@@ -4387,48 +4656,67 @@ function generateAccountDeployCode(){
   });
   const data = { v:2, type:'account_deploy', users: usersForExport, ts: Date.now() };
   const json = JSON.stringify(data);
-  const compressed = lzCompress(json);
-  return 'TA' + compressed;
+  const shortId = genShortId(4);
+  const path = `cloud/accounts/${shortId}.json`;
+  await githubPutFile(path, json, `部署账号 ${shortId}`);
+  return `TA-${shortId}`;
 }
-function parseAccountDeployCode(code){
+// Parse deploy code - cloud short code or legacy long code
+async function parseAccountDeployCode(code){
   try{
-    if(!code || !code.startsWith('TA')) return null;
-    const payload = code.substring(2);
-    // Try LZ compressed first
-    const json = lzDecompress(payload);
-    if(json){
-      const data = JSON.parse(json);
+    if(!code) return null;
+    // Cloud mode: TA-{shortId}
+    const cm = code.match(/^TA-([a-z0-9]{4})$/);
+    if(cm){
+      const path = `cloud/accounts/${cm[1]}.json`;
+      const text = await githubGetFile(path);
+      const data = JSON.parse(text);
       if(data.users) return data;
     }
-    // Fallback: Base64 (legacy v1)
-    try{
-      const b64json = decodeURIComponent(escape(atob(payload)));
-      const data = JSON.parse(b64json);
-      if(data.users) return data;
-    }catch(e2){}
+    // Legacy mode: TA + LZ compressed
+    if(code.startsWith('TA')){
+      const payload = code.substring(2);
+      const json = lzDecompress(payload);
+      if(json){
+        const data = JSON.parse(json);
+        if(data.users) return data;
+      }
+      try{
+        const b64json = decodeURIComponent(escape(atob(payload)));
+        const data = JSON.parse(b64json);
+        if(data.users) return data;
+      }catch(e2){}
+    }
     return null;
   }catch(e){ return null; }
 }
-function showAccountDeployModal(){
-  const code = generateAccountDeployCode();
-  const userCount = Object.keys(store.users).length;
+async function showAccountDeployModal(){
   const overlay = document.createElement('div');
   overlay.id = 'accountDeployModal';
   overlay.className = 'modal-overlay';
-  overlay.innerHTML = `
-    <div class="modal-card">
-      <div class="modal-title">📤 账号部署码</div>
-      <p style="font-size:.85rem;color:var(--muted);margin:0 0 12px">包含 ${userCount} 个账号（管理员+普通用户）。将此码发给新用户，他们在登录页点「导入账号码」粘贴后即可用你设置的密码登录。</p>
-      <textarea id="deployCodeArea" readonly style="width:100%;height:120px;padding:10px;border:1px solid var(--rule);border-radius:8px;font-size:.72rem;font-family:monospace;resize:none;background:var(--bg);color:var(--ink)">${code}</textarea>
-      <p style="font-size:.75rem;color:var(--muted);margin-top:6px;text-align:right">长度：${code.length} 字符</p>
-      <div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end">
-        <button onclick="copyDeployCode()" style="padding:8px 18px;border-radius:8px;background:var(--accent);color:#fff;border:none;cursor:pointer">📋 复制部署码</button>
-        <button onclick="document.getElementById('accountDeployModal').remove()" style="padding:8px 18px;border-radius:8px;border:1px solid var(--rule);background:var(--card);color:var(--muted);cursor:pointer">关闭</button>
-      </div>
-    </div>
-  `;
+  overlay.innerHTML = `<div class="modal-card"><div class="modal-title">⏳ 正在上传账号到云端...</div><p style="text-align:center;padding:30px 0">请稍候</p></div>`;
   document.body.appendChild(overlay);
-  overlay.addEventListener('click', e=>{ if(e.target===overlay) overlay.remove(); });
+  try{
+    const code = await generateAccountDeployCode();
+    const userCount = Object.keys(store.users).length;
+    overlay.innerHTML = `
+      <div class="modal-card">
+        <div class="modal-title">📤 账号部署码</div>
+        <p style="font-size:.85rem;color:var(--muted);margin-bottom:12px">包含 ${userCount} 个账号。将此码发给新用户，他们在登录页点「导入账号码」输入即可。</p>
+        <div style="background:var(--accent-soft);border:1px solid var(--accent);border-radius:8px;padding:16px;text-align:center;margin-bottom:12px">
+          <div style="font-size:1.8rem;font-weight:700;color:var(--accent);letter-spacing:2px">${code}</div>
+        </div>
+        <p style="font-size:.75rem;color:var(--muted);text-align:center">长度：${code.length} 字符</p>
+        <div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end">
+          <button onclick="copyDeployCode()" class="btn-primary" style="padding:8px 18px;border-radius:8px">📋 复制</button>
+          <button onclick="document.getElementById('accountDeployModal').remove()" style="padding:8px 18px;border-radius:8px;border:1px solid var(--rule);background:var(--card);color:var(--ink)">关闭</button>
+        </div>
+        <input type="hidden" id="deployCodeArea" value="${code}">
+      </div>
+    `;
+  }catch(e){
+    overlay.innerHTML = `<div class="modal-card"><div class="modal-title">❌ 错误</div><p style="color:var(--danger)">${e.message}</p><button onclick="document.getElementById('accountDeployModal').remove()" style="padding:8px 18px;border-radius:8px;border:1px solid var(--rule)">关闭</button></div>`;
+  }
 }
 function copyDeployCode(){
   const ta = document.getElementById('deployCodeArea');
@@ -4436,9 +4724,7 @@ function copyDeployCode(){
   const text = ta.value;
   if(navigator.clipboard && navigator.clipboard.writeText){
     navigator.clipboard.writeText(text).then(()=>toast('已复制到剪贴板')).catch(()=>fallbackCopy(ta));
-  } else {
-    fallbackCopy(ta);
-  }
+  } else { fallbackCopy(ta); }
 }
 function showImportAccountModal(){
   const overlay = document.createElement('div');
@@ -4447,8 +4733,12 @@ function showImportAccountModal(){
   overlay.innerHTML = `
     <div class="modal-card">
       <div class="modal-title">📋 导入账号码</div>
-      <p style="font-size:.85rem;color:var(--muted);margin:0 0 12px">将管理员发给你的账号部署码粘贴到下方，导入后即可用你的指令码登录。</p>
-      <textarea id="importCodeArea" placeholder="粘贴账号部署码（以 TA 开头）…" style="width:100%;height:100px;padding:10px;border:1px solid var(--rule);border-radius:8px;font-size:.82rem;font-family:monospace;resize:none;background:var(--bg);color:var(--ink)"></textarea>
+      <p style="font-size:.85rem;color:var(--muted);margin:0 0 12px">
+        将管理员发给你的账号部署码粘贴到下方，导入后即可用你的指令码登录。<br>
+        <span style="font-size:.78rem">💡 支持短码（如 <code>TA-abc123</code>）和完整长码</span>
+      </p>
+      <textarea id="importCodeArea" autofocus placeholder="粘贴账号部署码…" style="width:100%;height:80px;padding:10px;border:1px solid var(--rule);border-radius:8px;font-size:.85rem;font-family:monospace;resize:none;background:var(--bg);color:var(--ink)"></textarea>
+      <div id="importLoading" style="display:none;font-size:.82rem;color:var(--muted);margin-top:6px">⏳ 正在从云端下载…</div>
       <div id="importErr" style="color:#ef4444;font-size:.82rem;margin-top:6px;min-height:20px"></div>
       <div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end">
         <button onclick="applyAccountDeploy()" style="padding:8px 18px;border-radius:8px;background:var(--accent);color:#fff;border:none;cursor:pointer">确认导入</button>
@@ -4459,35 +4749,42 @@ function showImportAccountModal(){
   document.body.appendChild(overlay);
   overlay.addEventListener('click', e=>{ if(e.target===overlay) overlay.remove(); });
 }
-function applyAccountDeploy(){
+async function applyAccountDeploy(){
   const code = document.getElementById('importCodeArea').value.trim();
   const errEl = document.getElementById('importErr');
-  const data = parseAccountDeployCode(code);
-  if(!data){
-    errEl.textContent = '部署码无效，请检查是否完整复制';
-    return;
-  }
-  // Merge: add/update users from deploy code, preserve existing user practice data
-  if(!store.users) store.users = {};
-  Object.entries(data.users).forEach(([uid, u])=>{
-    if(store.users[uid]){
-      // Update account info but keep practice data
-      store.users[uid].username = u.username;
-      store.users[uid].password = u.password;
-      store.users[uid].role = u.role;
-      store.users[uid].expireAt = u.expireAt || 'never';
-    } else {
-      store.users[uid] = defaultUserObj(u.username, u.role, u.expireAt);
-      store.users[uid].password = u.password;
-      if(u.createdAt) store.users[uid].createdAt = u.createdAt;
+  const btn = event?.target;
+  if(btn){ btn.disabled = true; btn.textContent = '⏳ 下载中...'; }
+  errEl.textContent = '';
+  try{
+    const data = await parseAccountDeployCode(code);
+    if(!data){
+      errEl.textContent = '部署码无效，请检查';
+      if(btn){ btn.disabled=false; btn.textContent='确认导入'; }
+      return;
     }
-  });
-  store.loginState = { fails:0, lockedUntil:0 };
-  saveStore(store);
-  const overlay = document.getElementById('importAccountOverlay');
-  if(overlay) overlay.remove();
-  toast('账号导入成功！请用你的指令码登录');
-  renderLogin();
+    if(!store.users) store.users = {};
+    Object.entries(data.users).forEach(([uid, u])=>{
+      if(store.users[uid]){
+        store.users[uid].username = u.username;
+        store.users[uid].password = u.password;
+        store.users[uid].role = u.role;
+        store.users[uid].expireAt = u.expireAt || 'never';
+      } else {
+        store.users[uid] = defaultUserObj(u.username, u.role, u.expireAt);
+        store.users[uid].password = u.password;
+        if(u.createdAt) store.users[uid].createdAt = u.createdAt;
+      }
+    });
+    store.loginState = { fails:0, lockedUntil:0 };
+    saveStore(store);
+    const o = document.getElementById('importAccountOverlay');
+    if(o) o.remove();
+    toast('账号导入成功！请用你的指令码登录');
+    renderLogin();
+  }catch(e){
+    errEl.textContent = '导入失败: ' + e.message;
+    if(btn){ btn.disabled=false; btn.textContent='确认导入'; }
+  }
 }
 
 function enterApp(){
