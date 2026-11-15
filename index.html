@@ -628,20 +628,31 @@ const GITHUB_API_BASE = 'https://api.github.com/repos';
 
 function getGithubConfig(){
   const custom = store.adminSettings?.github || {};
-  // Default token (base64-encoded for minimal obfuscation)
-  const _t = typeof atob !== 'undefined' ? atob('Z2hwX3pVM2lDSWpPU3RjWm9FdGcxQ3BaaXFra2RKelNGZVIxd3k3MWg=') : '';
   return {
     owner: custom.owner || 'willowzhang2010',
     repo: custom.repo || 'toefl-typing-trainer',
     branch: custom.branch || 'main',
-    token: custom.token || _t,
+    // Token 不再内置在页面中，仅保存在管理员浏览器的 localStorage
+    token: custom.token || '',
   };
 }
 
 function saveGithubConfig(cfg){
   if(!store.adminSettings) store.adminSettings = {};
-  store.adminSettings.github = cfg;
+  // 合并保存，避免覆盖 materialVersion 等内部状态
+  store.adminSettings.github = Object.assign({}, store.adminSettings.github || {}, cfg);
   saveStore(store);
+}
+
+// 列出仓库某个目录下的文件名（用于计算素材版本号）
+async function githubListDir(path){
+  const cfg = getGithubConfig();
+  const headers = { 'Accept': 'application/vnd.github+json' };
+  if(cfg.token) headers['Authorization'] = `token ${cfg.token}`;
+  const resp = await fetch(`${GITHUB_API_BASE}/${cfg.owner}/${cfg.repo}/contents/${path}?ref=${cfg.branch}`, { headers });
+  if(!resp.ok) return [];
+  const arr = await resp.json();
+  return Array.isArray(arr) ? arr.map(x=>x.name) : [];
 }
 
 // Read a file from GitHub (API first to avoid CDN cache, raw as fallback)
@@ -665,7 +676,7 @@ async function githubGetFile(path){
 // Write a file to GitHub (needs token)
 async function githubPutFile(path, content, message){
   const cfg = getGithubConfig();
-  if(!cfg.token) throw new Error('请先在管理员设置中填入 GitHub Token');
+  if(!cfg.token) throw new Error('未配置 GitHub Token，请到「我的 → 设置 → GitHub 云端设置」填写并保存');
   const apiUrl = `${GITHUB_API_BASE}/${cfg.owner}/${cfg.repo}/contents/${path}`;
   
   // Get current file sha if exists
@@ -3304,8 +3315,16 @@ async function generateShareCode(){
     ts: Date.now(),
   };
   const json = JSON.stringify(data);
-  // Get next version number
-  const ver = (store.adminSettings?.github?.materialVersion || 0) + 1;
+  // 计算下一个版本号：取「本地记录」与「云端已有最大版本」中较大的 +1，避免覆盖历史版本
+  let ver = (store.adminSettings?.github?.materialVersion || 0) + 1;
+  try{
+    const names = await githubListDir('cloud/materials');
+    const maxRemote = names.reduce((m,n)=>{
+      const mm = n.match(/^v(\d+)\.json$/);
+      return mm ? Math.max(m, parseInt(mm[1],10)) : m;
+    }, 0);
+    ver = Math.max(ver, maxRemote + 1);
+  }catch(e){}
   const path = `cloud/materials/v${ver}.json`;
   await githubPutFile(path, json, `更新素材 v${ver}`);
   // Save version
@@ -3374,7 +3393,7 @@ async function showShareCodeModal(){
         <div class="modal-title">📤 共享素材更新码</div>
         <p style="font-size:.85rem;color:var(--muted);margin-bottom:12px">将以下更新码发给用户，用户在「我的 → 更新共享素材」中输入即可同步。</p>
         <div style="background:var(--accent-soft);border:1px solid var(--accent);border-radius:8px;padding:16px;text-align:center;margin-bottom:12px">
-          <div style="font-size:1.8rem;font-weight:700;color:var(--accent);letter-spacing:2px">${code}</div>
+          <div style="font-size:${code.length>24?'0.8rem':'1.8rem'};font-weight:700;color:var(--accent);letter-spacing:${code.length>24?'0':'2px'};word-break:break-all;line-height:1.5;max-height:180px;overflow:auto">${code}</div>
         </div>
         <p style="font-size:.75rem;color:var(--muted);text-align:center">长度：${code.length} 字符</p>
         <div style="display:flex;gap:10px;margin-top:14px;justify-content:flex-end">
@@ -3484,14 +3503,23 @@ async function generateReportCode(){
       ts: Date.now(),
     };
     const json = JSON.stringify(data);
-    const shortId = genShortId(4);
-    const path = `cloud/reports/${shortId}.json`;
-    await githubPutFile(path, json, `用户上报 ${user?user.username:'unknown'} ${shortId}`);
-    const code = 'TR-' + shortId;
+    const cfg = getGithubConfig();
+    let code, isCloud = false;
+    if(cfg.token){
+      const shortId = genShortId(4);
+      await githubPutFile(`cloud/reports/${shortId}.json`, json, `用户上报 ${(user?user.username:'unknown')} ${shortId}`);
+      code = 'TR-' + shortId;
+      isCloud = true;
+    } else {
+      // 未配置 Token 时回退为本地压缩码：较长，但功能不受影响
+      code = 'TR' + lzCompress(json);
+    }
     overlay.innerHTML = `
       <div class="modal-card">
         <div class="modal-title">📋 练习数据上报码</div>
-        <p style="font-size:.85rem;color:var(--muted);margin-bottom:12px">将此码发给管理员，管理员导入后可汇总到项目数据看板。</p>
+        <p style="font-size:.85rem;color:var(--muted);margin-bottom:12px">
+          将此码发给管理员，管理员导入后可汇总到项目数据看板。${isCloud ? '' : '<br><span style="color:var(--warn)">当前为本地码（管理员未配置云端 Token），码较长，请完整复制。</span>'}
+        </p>
         <div style="background:var(--bg);border:1px solid var(--rule);border-radius:8px;padding:12px;margin-bottom:12px;font-size:.82rem">
           <div style="display:flex;justify-content:space-between;margin-bottom:6px"><span style="color:var(--muted)">用户</span><span style="font-weight:600">${user?user.username:'未知'}</span></div>
           <div style="display:flex;justify-content:space-between;margin-bottom:6px"><span style="color:var(--muted)">练习次数</span><span>${(u.practices||[]).length} 次</span></div>
@@ -3499,7 +3527,7 @@ async function generateReportCode(){
           <div style="display:flex;justify-content:space-between"><span style="color:var(--muted)">最高 WPM</span><span>${u.stats?.bestWpm||0}</span></div>
         </div>
         <div style="background:var(--accent-soft);border:1px solid var(--accent);border-radius:8px;padding:16px;text-align:center;margin-bottom:12px">
-          <div style="font-size:1.8rem;font-weight:700;color:var(--accent);letter-spacing:2px">${code}</div>
+          <div style="font-size:${code.length>24?'0.8rem':'1.8rem'};font-weight:700;color:var(--accent);letter-spacing:${code.length>24?'0':'2px'};word-break:break-all;line-height:1.5;max-height:180px;overflow:auto">${code}</div>
         </div>
         <p style="font-size:.75rem;color:var(--muted);text-align:center">长度：${code.length} 字符</p>
         <div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end">
@@ -4713,7 +4741,7 @@ async function showAccountDeployModal(){
         <div class="modal-title">📤 账号部署码</div>
         <p style="font-size:.85rem;color:var(--muted);margin-bottom:12px">包含 ${userCount} 个账号。将此码发给新用户，他们在登录页点「导入账号码」输入即可。</p>
         <div style="background:var(--accent-soft);border:1px solid var(--accent);border-radius:8px;padding:16px;text-align:center;margin-bottom:12px">
-          <div style="font-size:1.8rem;font-weight:700;color:var(--accent);letter-spacing:2px">${code}</div>
+          <div style="font-size:${code.length>24?'0.8rem':'1.8rem'};font-weight:700;color:var(--accent);letter-spacing:${code.length>24?'0':'2px'};word-break:break-all;line-height:1.5;max-height:180px;overflow:auto">${code}</div>
         </div>
         <p style="font-size:.75rem;color:var(--muted);text-align:center">长度：${code.length} 字符</p>
         <div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end">
