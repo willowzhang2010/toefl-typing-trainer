@@ -644,12 +644,21 @@ function saveGithubConfig(cfg){
   saveStore(store);
 }
 
-// Read a file from GitHub (public, no token needed)
+// Read a file from GitHub (API first to avoid CDN cache, raw as fallback)
 async function githubGetFile(path){
   const cfg = getGithubConfig();
+  // Contents API: always最新，不受 raw CDN 缓存影响
+  try{
+    const apiUrl = `${GITHUB_API_BASE}/${cfg.owner}/${cfg.repo}/contents/${path}?ref=${cfg.branch}`;
+    const headers = { 'Accept': 'application/vnd.github.raw' };
+    if(cfg.token) headers['Authorization'] = `token ${cfg.token}`;
+    const resp = await fetch(apiUrl, { headers });
+    if(resp.ok) return await resp.text();
+  }catch(e){}
+  // 回退到 raw 地址
   const url = `${GITHUB_RAW_BASE}/${cfg.owner}/${cfg.repo}/${cfg.branch}/${path}`;
-  const resp = await fetch(url);
-  if(!resp.ok) throw new Error('文件不存在或网络错误');
+  const resp = await fetch(url + '?t=' + Date.now());
+  if(!resp.ok) throw new Error('云端文件不存在（可能尚未同步，请稍后重试）');
   return await resp.text();
 }
 
